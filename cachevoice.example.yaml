@@ -1,0 +1,129 @@
+# cachevoice.example.yaml
+# CacheClaw TTS caching proxy — LiteLLM multi-provider config
+
+server:
+  host: "0.0.0.0"
+  port: 8844
+  log_level: "info"
+
+# ── Telegram Bot API ──────────────────────────────────────────
+telegram:
+  bot_token: "${TELEGRAM_BOT_TOKEN}"
+
+# ── TTS Providers ──────────────────────────────────────────────
+# Each provider maps to a LiteLLM model name.
+# Use ${ENV_VAR} for secrets — resolved at load time.
+providers:
+  default: "minimax"
+
+  # Fallback order when primary fails (server/timeout errors only).
+  fallback_chain:
+    - "minimax"
+    - "openai"
+    - "elevenlabs"
+    - "proxy"
+    - "edge"
+
+  minimax:
+    litellm_model: "minimax/speech-01-turbo"
+    base_url: "https://api.gateai.app/v1"
+    api_key: "${MINIMAX_API_KEY}"
+    default_voice: "Decent_Boy"
+    timeout: 15
+
+  openai:
+    litellm_model: "openai/tts-1"
+    api_key: "${OPENAI_TTS_API_KEY}"
+    default_voice: "alloy"
+    timeout: 15
+
+  elevenlabs:
+    litellm_model: "elevenlabs/eleven_multilingual_v2"
+    api_key: "${ELEVENLABS_API_KEY}"
+    default_voice: "some-voice-id"
+    timeout: 20
+
+  proxy:
+    litellm_model: "openai/tts-1"
+    base_url: "http://localhost:5111/v1"
+    api_key: ""
+    default_voice: "Decent_Boy"
+    timeout: 10
+
+  edge:
+    litellm_model: "edge/tts"
+    default_voice: "tr-TR-AhmetNeural"
+    timeout: 15
+
+# ── Voice Mapping ──────────────────────────────────────────────
+# Maps OpenAI-style voice names → provider-specific voice IDs.
+# If no mapping found, voice name passes through unchanged.
+voice_mapping:
+  minimax:
+    alloy: "Decent_Boy"
+    nova: "Cute_Girl"
+    echo: "Deep_Voice_Man"
+  openai:
+    alloy: "alloy"
+    nova: "nova"
+    echo: "echo"
+  elevenlabs:
+    alloy: "21m00Tcm4TlvDq8ikWAM"
+  edge:
+    alloy: "tr-TR-AhmetNeural"
+    nova: "tr-TR-EmelNeural"
+
+# ── Model Mapping ──────────────────────────────────────────────
+# Maps generic model names → provider-specific model identifiers.
+model_mapping:
+  minimax:
+    tts-1: "speech-01-turbo"
+    tts-1-hd: "speech-01-turbo"
+  openai:
+    tts-1: "tts-1"
+    tts-1-hd: "tts-1-hd"
+  elevenlabs:
+    tts-1: "eleven_multilingual_v2"
+
+# ── Cache ──────────────────────────────────────────────────────
+cache:
+  audio_dir: "./data/audio"
+  db_path: "./data/cache.db"
+  enabled: true
+  fuzzy:
+    enabled: true
+    threshold: 90
+    scorer: "token_sort_ratio"
+  semantic:
+    enabled: false
+  normalize:
+    lowercase: true
+    strip_punctuation: true
+    collapse_whitespace: true
+    replace_numbers: true
+  eviction:
+    max_size_mb: 500
+    max_entries: 50000
+    max_text_length: 500
+    cleanup_interval_hours: 1
+    min_age_days: 7
+
+# ── Fillers ────────────────────────────────────────────────────
+fillers:
+  auto_generate_on_startup: false
+  voice_id: ""
+  templates:
+    - id: "ack_listening"
+      text: "Evet, dinliyorum"
+    - id: "ack_started"
+      text: "Hemen bakıyorum"
+    - id: "ack_searching"
+      text: "Araştırıyorum"
+    - id: "ack_analyzing"
+      text: "Analiz ediyorum"
+    - id: "ack_thinking"
+      text: "Düşünüyorum, bir saniye"
+    - id: "ack_summarizing"
+      text: "Özetliyorum"
+    - id: "ack_wait"
+      text: "Bir dakika"
