@@ -45,7 +45,7 @@ providers:
 
   proxy:
     litellm_model: "openai/tts-1"
-    base_url: "http://localhost:5111/v1"
+    base_url: "http://host.docker.internal:5111/v1"
     api_key: ""
     default_voice: "Decent_Boy"
     timeout: 10
