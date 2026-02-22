@@ -21,6 +21,21 @@ from .fillers.manager import FillerManager
 
 logger = logging.getLogger("cachevoice")
 
+
+def _setup_logging(log_level: str = "info"):
+    """Configure structured logging for cachevoice."""
+    level = getattr(logging, log_level.upper(), logging.INFO)
+    handler = logging.StreamHandler()
+    handler.setLevel(level)
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.setLevel(level)
+    logger.propagate = False
+
+
 _store: FuzzyCacheStorage | None = None
 _db: CacheMetadataDB | None = None
 _gateway: LiteLLMRouter | None = None
@@ -59,6 +74,7 @@ async def _periodic_eviction():
 async def lifespan(app: FastAPI):
     global _store, _db, _gateway, _filler_mgr, _settings, _evictor, _eviction_task, _write_counter
     _settings = _load_settings()
+    _setup_logging(_settings.server.log_level)
     logger.info("CacheClaw starting on port %s...", _settings.server.port)
 
     _db = CacheMetadataDB(_settings.cache.db_path)
@@ -192,17 +208,22 @@ async def audio_speech(request: Request):
         result = _store.lookup(text, voice)
         if result:
             audio_path = result["audio_path"]
-            cached_format = Path(audio_path).suffix[1:]  # Extract format from file extension
+            cached_format = Path(audio_path).suffix[1:]
             
             try:
                 audio_data = Path(audio_path).read_bytes()
                 
-                # Convert if cached format doesn't match requested format
+                match_type = result["match_type"]
+                reason_code = "exact_hit" if match_type == "exact" else "fuzzy_hit"
+                
                 if cached_format != response_format and response_format != "mp3":
                     converted = _convert_audio_format(audio_data, response_format)
                     if converted:
                         audio_data = converted
-                        logger.info("Cache HIT + converted %s->%s: %s", cached_format, response_format, text[:50])
+                        logger.info(
+                            "Cache HIT + converted | reason_code=%s text_preview='%s' voice_id=%s score=%s format=%s->%s",
+                            reason_code, text[:50], voice, result["score"], cached_format, response_format
+                        )
                     else:
                         logger.warning("Cache HIT but conversion failed, using cached format")
                         response_format = cached_format
@@ -210,11 +231,19 @@ async def audio_speech(request: Request):
                 if _db:
                     normalized = result.get("normalized", normalize(text))
                     await _db.record_hit_async(normalized, voice)
-                logger.info("Cache %s (score=%s): %s", result["match_type"], result["score"], text[:50])
+                
+                logger.info(
+                    "Cache HIT | reason_code=%s text_preview='%s' voice_id=%s score=%s",
+                    reason_code, text[:50], voice, result["score"]
+                )
                 
                 content_type = {"mp3": "audio/mpeg", "opus": "audio/ogg", "ogg": "audio/ogg", "wav": "audio/wav"}.get(response_format, "audio/mpeg")
                 return Response(content=audio_data, media_type=content_type)
             except FileNotFoundError:
+                logger.warning(
+                    "Cache lookup failed | reason_code=error_file_not_found text_preview='%s' voice_id=%s audio_path=%s",
+                    text[:50], voice, audio_path
+                )
                 pass
 
     if not _gateway or not getattr(_gateway, "available", True):
@@ -242,7 +271,10 @@ async def audio_speech(request: Request):
     # Cache the audio in the format we're returning
     if _store and _db and _settings:
         if len(text) > _settings.cache.eviction.max_text_length:
-            logger.info("Text too long (%d chars), skipping cache", len(text))
+            logger.info(
+                "Cache MISS | reason_code=miss_text_too_long text_preview='%s' voice_id=%s text_length=%d",
+                text[:50], voice, len(text)
+            )
         else:
             normalized = normalize(text)
             audio_path = _store.store(text, voice, audio_data, provider_format)
@@ -251,7 +283,10 @@ async def audio_speech(request: Request):
                 audio_path=audio_path, model=model, audio_format=provider_format,
                 file_size=len(audio_data),
             )
-            logger.info("Cache MISS -> stored: %s", text[:50])
+            logger.info(
+                "Cache MISS | reason_code=miss text_preview='%s' voice_id=%s format=%s",
+                text[:50], voice, provider_format
+            )
             
             global _write_counter, _evictor
             _write_counter += 1
@@ -263,6 +298,11 @@ async def audio_speech(request: Request):
                         logger.info("Write-triggered eviction removed %d entries", removed)
                 except Exception as e:
                     logger.error("Write-triggered eviction failed: %s", e)
+    else:
+        logger.info(
+            "Cache MISS | reason_code=miss_no_cache text_preview='%s' voice_id=%s",
+            text[:50], voice
+        )
 
     content_type = {"mp3": "audio/mpeg", "opus": "audio/ogg", "ogg": "audio/ogg", "wav": "audio/wav"}.get(response_format, "audio/mpeg")
     return Response(content=audio_data, media_type=content_type)
