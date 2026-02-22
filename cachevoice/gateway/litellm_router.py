@@ -220,12 +220,12 @@ class LiteLLMRouter:
         return mapped_model
 
     @staticmethod
-    def _has_api_key(api_key: str) -> bool:
+    def _has_api_key(api_key: str | None) -> bool:
         if api_key is None:
             return False
         stripped = api_key.strip()
         if not stripped:
-            return True  # Empty string means no auth required
+            return False  # Empty string means no key provided
         return not (stripped.startswith("${") and stripped.endswith("}"))
 
     @staticmethod

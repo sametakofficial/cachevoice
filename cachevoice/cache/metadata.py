@@ -109,18 +109,30 @@ class CacheMetadataDB:
                   file_size: int = 0, is_filler: bool = False,
                   version_num: int = 1) -> int:
         conn = self._get_conn()
-        cursor = conn.execute(
-            """INSERT INTO cache_entries (text_original, text_normalized, voice_id, model,
-               audio_path, audio_format, file_size, is_filler, version_num)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (text_original, text_normalized, voice_id, model, audio_path,
-             audio_format, file_size, int(is_filler), version_num)
-        )
-        conn.commit()
-        entry_id = cursor.lastrowid
-        conn.close()
+        try:
+            cursor = conn.execute(
+                """INSERT OR IGNORE INTO cache_entries (text_original, text_normalized, voice_id, model,
+                   audio_path, audio_format, file_size, is_filler, version_num)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (text_original, text_normalized, voice_id, model, audio_path,
+                 audio_format, file_size, int(is_filler), version_num)
+            )
+            conn.commit()
+
+            if cursor.rowcount == 1:
+                entry_id = cursor.lastrowid
+            else:
+                row = conn.execute(
+                    """SELECT id FROM cache_entries
+                       WHERE text_normalized = ? AND voice_id = ? AND version_num = ?""",
+                    (text_normalized, voice_id, version_num)
+                ).fetchone()
+                entry_id = row["id"] if row else None
+        finally:
+            conn.close()
+
         if entry_id is None:
-            raise RuntimeError("Failed to insert cache entry: lastrowid is None")
+            raise RuntimeError("Failed to insert cache entry: missing entry id after insert")
         return entry_id
 
     def record_hit(self, text_normalized: str, voice_id: str,
@@ -154,7 +166,7 @@ class CacheMetadataDB:
         conn.close()
         return row["cnt"] if row else 0
 
-    def get_all_entries(self) -> list[dict]:
+    def get_all_entries(self) -> list[dict[str, object]]:
         conn = self._get_conn()
         rows = conn.execute(
             "SELECT text_normalized, voice_id, audio_path, is_filler, version_num FROM cache_entries"
@@ -162,7 +174,7 @@ class CacheMetadataDB:
         conn.close()
         return [dict(r) for r in rows]
 
-    def get_stats(self) -> dict:
+    def get_stats(self) -> dict[str, int]:
         conn = self._get_conn()
         row = conn.execute("""
             SELECT COUNT(*) as total_entries,
@@ -172,7 +184,14 @@ class CacheMetadataDB:
             FROM cache_entries
         """).fetchone()
         conn.close()
-        return dict(row) if row else {"total_entries": 0, "total_size_bytes": 0, "total_hits": 0, "filler_count": 0}
+        if not row:
+            return {"total_entries": 0, "total_size_bytes": 0, "total_hits": 0, "filler_count": 0}
+        return {
+            "total_entries": int(row["total_entries"]),
+            "total_size_bytes": int(row["total_size_bytes"]),
+            "total_hits": int(row["total_hits"]),
+            "filler_count": int(row["filler_count"] or 0),
+        }
 
     def get_schema_version(self) -> int:
         conn = self._get_conn()
@@ -200,10 +219,10 @@ class CacheMetadataDB:
         conn.close()
         return paths
 
-    def get_eviction_candidates(self, max_entries: int, min_age_days: int) -> list[dict]:
+    def get_eviction_candidates(self, max_entries: int, min_age_days: int) -> list[dict[str, object]]:
         conn = self._get_conn()
         candidates = conn.execute(
-            """SELECT id, audio_path FROM cache_entries
+            """SELECT id, audio_path, text_normalized, voice_id FROM cache_entries
                WHERE is_filler = 0 AND hit_count = 0
                AND created_at < datetime('now', ?)
                ORDER BY created_at ASC""",
@@ -214,7 +233,7 @@ class CacheMetadataDB:
         if current_count - len(result) > max_entries:
             extra_needed = current_count - len(result) - max_entries
             extra = conn.execute(
-                """SELECT id, audio_path FROM cache_entries
+                """SELECT id, audio_path, text_normalized, voice_id FROM cache_entries
                    WHERE is_filler = 0 ORDER BY last_hit_at ASC LIMIT ?""",
                 (extra_needed,)
             ).fetchall()

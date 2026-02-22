@@ -71,6 +71,7 @@ class NormalizeConfig(BaseModel):
     strip_punctuation: bool = True
     collapse_whitespace: bool = True
     replace_numbers: bool = True
+    strip_minimax: bool = True
 
 class EvictionConfig(BaseModel):
     max_size_mb: int = 500

@@ -1,5 +1,6 @@
 import pytest
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from cachevoice.cache.metadata import CacheMetadataDB, CURRENT_SCHEMA_VERSION
 
 
@@ -43,10 +44,11 @@ def test_schema_version_tracked(db):
     assert db.get_schema_version() == CURRENT_SCHEMA_VERSION
 
 
-def test_unique_constraint_same_version_rejects_duplicate(db):
-    db.add_entry("hello", "hello", "voice1", "/tmp/a.mp3", version_num=1)
-    with pytest.raises(sqlite3.IntegrityError):
-        db.add_entry("hello", "hello", "voice1", "/tmp/b.mp3", version_num=1)
+def test_unique_constraint_same_version_deduplicates_insert(db):
+    first_id = db.add_entry("hello", "hello", "voice1", "/tmp/a.mp3", version_num=1)
+    second_id = db.add_entry("hello", "hello", "voice1", "/tmp/b.mp3", version_num=1)
+    assert second_id == first_id
+    assert db.get_version_count("hello", "voice1") == 1
 
 
 def test_unique_constraint_different_version_allowed(db):
@@ -166,3 +168,20 @@ def test_migration_deduplicates_keeps_highest_hit_count(tmp_path):
     conn.close()
     assert row["hit_count"] == 10
     assert row["audio_path"] == "/tmp/high.mp3"
+
+
+def test_concurrent_add_entry_same_key_creates_single_row(db):
+    def add_once() -> int:
+        return db.add_entry(
+            "parallel hello",
+            "parallel hello",
+            "voice1",
+            "/tmp/parallel.mp3",
+            version_num=1,
+        )
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        ids = list(pool.map(lambda _n: add_once(), range(10)))
+
+    assert len(set(ids)) == 1
+    assert db.get_version_count("parallel hello", "voice1") == 1

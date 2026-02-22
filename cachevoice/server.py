@@ -10,6 +10,7 @@ import hashlib
 import tempfile
 import subprocess
 import os
+import sqlite3
 
 from .config import Settings
 from .cache.store import FuzzyCacheStorage
@@ -93,9 +94,9 @@ async def lifespan(app: FastAPI):
     
     _evictor = CacheEvictor(
         _db,
-        max_entries=_settings.cache.eviction.max_entries,
-        max_size_mb=_settings.cache.eviction.max_size_mb,
-        min_age_days=_settings.cache.eviction.min_age_days,
+        _settings.cache.eviction.max_entries,
+        _settings.cache.eviction.max_size_mb,
+        _settings.cache.eviction.min_age_days,
     )
     _write_counter = 0
     _eviction_task = asyncio.create_task(_periodic_eviction())
@@ -229,7 +230,7 @@ async def audio_speech(request: Request):
                         response_format = cached_format
                 
                 if _db:
-                    normalized = result.get("normalized", normalize(text))
+                    normalized = result.get("matched", result.get("normalized", normalize(text)))
                     await _db.record_hit_async(normalized, voice)
                 
                 logger.info(
@@ -278,15 +279,22 @@ async def audio_speech(request: Request):
         else:
             normalized = normalize(text)
             audio_path = _store.store(text, voice, audio_data, provider_format)
-            _db.add_entry(
-                text_original=text, text_normalized=normalized, voice_id=voice,
-                audio_path=audio_path, model=model, audio_format=provider_format,
-                file_size=len(audio_data),
-            )
-            logger.info(
-                "Cache MISS | reason_code=miss text_preview='%s' voice_id=%s format=%s",
-                text[:50], voice, provider_format
-            )
+            try:
+                _db.add_entry(
+                    text_original=text, text_normalized=normalized, voice_id=voice,
+                    audio_path=audio_path, model=model, audio_format=provider_format,
+                    file_size=len(audio_data),
+                )
+                logger.info(
+                    "Cache MISS | reason_code=miss text_preview='%s' voice_id=%s format=%s",
+                    text[:50], voice, provider_format
+                )
+            except sqlite3.IntegrityError:
+                await _db.record_hit_async(normalized, voice)
+                logger.info(
+                    "Cache MISS handled as HIT | reason_code=miss_race_duplicate text_preview='%s' voice_id=%s",
+                    text[:50], voice
+                )
             
             global _write_counter, _evictor
             _write_counter += 1

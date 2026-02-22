@@ -230,3 +230,28 @@ async def test_max_text_length_enforcement_skips_cache_store(litellm_env: LiteLL
     assert response.status_code == 200
     assert litellm_env.store.size == 0
     assert len(litellm_env.db.get_all_entries()) == 0
+
+
+def test_has_api_key_empty_string_returns_false():
+    from cachevoice.gateway.litellm_router import LiteLLMRouter
+    assert LiteLLMRouter._has_api_key("") is False
+
+
+def test_has_api_key_whitespace_only_returns_false():
+    from cachevoice.gateway.litellm_router import LiteLLMRouter
+    assert LiteLLMRouter._has_api_key("   ") is False
+
+
+def test_has_api_key_real_key_returns_true():
+    from cachevoice.gateway.litellm_router import LiteLLMRouter
+    assert LiteLLMRouter._has_api_key("real-key-123") is True
+
+
+def test_has_api_key_unresolved_env_var_returns_false():
+    from cachevoice.gateway.litellm_router import LiteLLMRouter
+    assert LiteLLMRouter._has_api_key("${MISSING_VAR}") is False
+
+
+def test_has_api_key_none_returns_false():
+    from cachevoice.gateway.litellm_router import LiteLLMRouter
+    assert LiteLLMRouter._has_api_key(None) is False

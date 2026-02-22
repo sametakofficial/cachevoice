@@ -31,8 +31,8 @@ def test_speech_empty_input(client):
 
 def test_speech_no_gateway(client):
     resp = client.post("/v1/audio/speech", json={"input": "test", "voice": "Decent_Boy"})
-    # No API key configured, LiteLLM returns 502 for connection errors
-    assert resp.status_code == 502
+    # No API key configured, all providers skipped, returns 503
+    assert resp.status_code == 503
 
 
 def test_cache_clear(client):

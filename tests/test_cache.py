@@ -1,5 +1,9 @@
 import pytest
 from cachevoice.cache.store import FuzzyCacheStorage
+from cachevoice.cache.metadata import CacheMetadataDB
+from cachevoice.cache.evictor import CacheEvictor
+from cachevoice.cache.normalizer import normalize
+from pathlib import Path
 
 
 @pytest.fixture
@@ -39,3 +43,32 @@ def test_clear(store):
     assert store.size == 1
     store.clear()
     assert store.size == 0
+
+
+def test_eviction_syncs_hot_cache(tmp_path):
+    """After eviction, HotCache must not contain stale entries (no FileNotFoundError)."""
+    audio_dir = tmp_path / "audio"
+    db_path = str(tmp_path / "cache.db")
+
+    store = FuzzyCacheStorage(str(audio_dir))
+    db = CacheMetadataDB(db_path)
+
+    text = "merhaba dünya"
+    voice = "Decent_Boy"
+    normalized = normalize(text)
+    audio_path = store.store(text, voice, b"fake_audio_data")
+    db.add_entry(
+        text_original=text, text_normalized=normalized, voice_id=voice,
+        audio_path=audio_path, model="tts-1", audio_format="mp3",
+        file_size=len(b"fake_audio_data"),
+    )
+
+    assert store.lookup(text, voice) is not None
+    assert Path(audio_path).exists()
+
+    evictor = CacheEvictor(db, max_entries=0, hot_cache=store.hot_cache)
+    removed = evictor.run()
+    assert removed == 1
+
+    assert not Path(audio_path).exists()
+    assert store.lookup(text, voice) is None
