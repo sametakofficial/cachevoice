@@ -81,7 +81,7 @@ async def lifespan(app: FastAPI):
     _db = CacheMetadataDB(_settings.cache.db_path)
     _store = FuzzyCacheStorage(
         audio_dir=_settings.cache.audio_dir,
-        fuzzy_threshold=_settings.cache.fuzzy.threshold,
+        fuzzy_config=_settings.cache.fuzzy,
     )
 
     entries = _db.get_all_entries()
@@ -190,7 +190,23 @@ def _convert_audio_format(audio_data: bytes, target_format: str) -> bytes | None
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "cache_size": _store.size if _store else 0}
+    provider_status = "unknown"
+    last_error = None
+    
+    if _gateway:
+        provider_status = "available" if getattr(_gateway, "available", True) else "unavailable"
+        last_error = getattr(_gateway, "last_error_time", None)
+    
+    response = {
+        "status": "ok",
+        "cache_size": _store.size if _store else 0,
+        "provider_status": provider_status
+    }
+    
+    if last_error:
+        response["last_error_time"] = last_error
+    
+    return response
 
 
 @app.post("/v1/audio/speech")
@@ -272,11 +288,13 @@ async def audio_speech(request: Request):
     # Cache the audio in the format we're returning
     if _store and _db and _settings:
         if len(text) > _settings.cache.eviction.max_text_length:
+            _db.record_miss()
             logger.info(
                 "Cache MISS | reason_code=miss_text_too_long text_preview='%s' voice_id=%s text_length=%d",
                 text[:50], voice, len(text)
             )
         else:
+            _db.record_miss()
             normalized = normalize(text)
             audio_path = _store.store(text, voice, audio_data, provider_format)
             try:
@@ -307,6 +325,8 @@ async def audio_speech(request: Request):
                 except Exception as e:
                     logger.error("Write-triggered eviction failed: %s", e)
     else:
+        if _db:
+            _db.record_miss()
         logger.info(
             "Cache MISS | reason_code=miss_no_cache text_preview='%s' voice_id=%s",
             text[:50], voice

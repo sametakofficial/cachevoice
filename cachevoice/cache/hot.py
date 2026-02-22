@@ -1,55 +1,83 @@
 """In-memory hot cache (dict) — loaded from SQLite at startup."""
 from __future__ import annotations
-from typing import Optional
+from collections import defaultdict
+from typing import Optional, Callable, Any
 from rapidfuzz import process, fuzz
+
+SCORERS: dict[str, Callable[..., Any]] = {
+    "token_sort_ratio": fuzz.token_sort_ratio,
+    "ratio": fuzz.ratio,
+    "partial_ratio": fuzz.partial_ratio,
+    "WRatio": fuzz.WRatio,
+}
 
 
 class HotCache:
     def __init__(self):
-        self._exact: dict[str, str] = {}
-        self._texts: list[str] = []
-        self._text_to_path: dict[str, str] = {}
+        # Voice bucketing: voice_id -> normalized_text -> [audio_paths]
+        self._buckets: dict[str, dict[str, list[str]]] = defaultdict(lambda: dict[str, list[str]]())
 
-    def load_entries(self, entries: list[dict]):
+    def load_entries(self, entries: list[dict[str, str]]):
         for e in entries:
-            key = f"{e['text_normalized']}:{e['voice_id']}"
-            self._exact[key] = e['audio_path']
-            if e['text_normalized'] not in self._text_to_path:
-                self._texts.append(e['text_normalized'])
-            self._text_to_path[e['text_normalized']] = e['audio_path']
+            vid = e['voice_id']
+            norm = e['text_normalized']
+            path = e['audio_path']
+            bucket = self._buckets[vid]
+            if norm not in bucket:
+                bucket[norm] = []
+            if path not in bucket[norm]:
+                bucket[norm].append(path)
 
     def exact_lookup(self, normalized_text: str, voice_id: str) -> Optional[str]:
-        return self._exact.get(f"{normalized_text}:{voice_id}")
+        bucket = self._buckets.get(voice_id)
+        if not bucket:
+            return None
+        paths = bucket.get(normalized_text)
+        return paths[0] if paths else None
 
-    def fuzzy_lookup(self, normalized_text: str, voice_id: str, threshold: int = 90) -> Optional[tuple[str, str, float]]:
-        # Filter candidates to only texts that exist for this voice_id
-        candidates = [text for text in self._texts if f"{text}:{voice_id}" in self._exact]
+    def fuzzy_lookup(
+        self, normalized_text: str, voice_id: str,
+        threshold: int = 90, scorer: str = "token_sort_ratio",
+    ) -> Optional[tuple[str, str, float]]:
+        bucket = self._buckets.get(voice_id)
+        if not bucket:
+            return None
+        candidates = list(bucket.keys())
         if not candidates:
             return None
+        scorer_fn = SCORERS.get(scorer, fuzz.token_sort_ratio)
         match = process.extractOne(
             normalized_text, candidates,
-            scorer=fuzz.token_sort_ratio, score_cutoff=threshold,
+            scorer=scorer_fn, score_cutoff=threshold,
         )
         if match:
             matched_text, score, _ = match
-            return (matched_text, self._exact[f"{matched_text}:{voice_id}"], score)
+            paths = bucket[matched_text]
+            return (matched_text, paths[0], score)
         return None
 
+    def get_paths(self, normalized_text: str, voice_id: str) -> list[str]:
+        bucket = self._buckets.get(voice_id)
+        if not bucket:
+            return []
+        return list(bucket.get(normalized_text, []))
+
     def add(self, normalized_text: str, voice_id: str, audio_path: str):
-        key = f"{normalized_text}:{voice_id}"
-        self._exact[key] = audio_path
-        if normalized_text not in self._text_to_path:
-            self._texts.append(normalized_text)
-        self._text_to_path[normalized_text] = audio_path
+        bucket = self._buckets[voice_id]
+        if normalized_text not in bucket:
+            bucket[normalized_text] = []
+        paths = bucket[normalized_text]
+        if audio_path not in paths:
+            paths.append(audio_path)
 
     def remove(self, normalized_text: str, voice_id: str):
-        self._exact.pop(f"{normalized_text}:{voice_id}", None)
+        bucket = self._buckets.get(voice_id)
+        if bucket:
+            bucket.pop(normalized_text, None)
 
     def clear(self):
-        self._exact.clear()
-        self._texts.clear()
-        self._text_to_path.clear()
+        self._buckets.clear()
 
     @property
     def size(self) -> int:
-        return len(self._exact)
+        return sum(len(b) for b in self._buckets.values())

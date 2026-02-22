@@ -8,16 +8,16 @@ from .matcher import FuzzyMatcher
 from .normalizer import normalize
 
 if TYPE_CHECKING:
-    from ..config import NormalizeConfig
+    from ..config import FuzzyConfig, NormalizeConfig
 
 
 class FuzzyCacheStorage:
-    def __init__(self, audio_dir: str, fuzzy_threshold: int = 90,
+    def __init__(self, audio_dir: str, fuzzy_config: FuzzyConfig | None = None,
                  normalize_config: NormalizeConfig | None = None):
         self._audio_dir = Path(audio_dir)
         self._audio_dir.mkdir(parents=True, exist_ok=True)
         self._hot = HotCache()
-        self._matcher = FuzzyMatcher(self._hot, fuzzy_threshold)
+        self._matcher = FuzzyMatcher(self._hot, fuzzy_config)
         self._normalize_config = normalize_config
 
     @property
@@ -28,7 +28,7 @@ class FuzzyCacheStorage:
     def matcher(self) -> FuzzyMatcher:
         return self._matcher
 
-    def lookup(self, text: str, voice_id: str) -> Optional[dict]:
+    def lookup(self, text: str, voice_id: str) -> Optional[dict[str, object]]:
         return self._matcher.find(text, voice_id)
 
     def store(self, text: str, voice_id: str, audio_data: bytes, audio_format: str = "mp3") -> str:

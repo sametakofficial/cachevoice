@@ -11,6 +11,7 @@ CURRENT_SCHEMA_VERSION = 2
 class CacheMetadataDB:
     def __init__(self, db_path: str):
         self._db_path = db_path
+        self._miss_count = 0
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
@@ -157,6 +158,14 @@ class CacheMetadataDB:
                                version_num: Optional[int] = None):
         await asyncio.to_thread(self.record_hit, text_normalized, voice_id, version_num)
 
+    def record_miss(self):
+        """Increment miss counter."""
+        self._miss_count += 1
+
+    def get_miss_count(self) -> int:
+        """Get current miss count."""
+        return self._miss_count
+
     def get_version_count(self, text_normalized: str, voice_id: str) -> int:
         conn = self._get_conn()
         row = conn.execute(
@@ -174,23 +183,68 @@ class CacheMetadataDB:
         conn.close()
         return [dict(r) for r in rows]
 
-    def get_stats(self) -> dict[str, int]:
+    def get_stats(self) -> dict[str, object]:
         conn = self._get_conn()
         row = conn.execute("""
             SELECT COUNT(*) as total_entries,
                    COALESCE(SUM(file_size), 0) as total_size_bytes,
                    COALESCE(SUM(hit_count), 0) as total_hits,
-                   SUM(CASE WHEN is_filler = 1 THEN 1 ELSE 0 END) as filler_count
+                   SUM(CASE WHEN is_filler = 1 THEN 1 ELSE 0 END) as filler_count,
+                   MIN(created_at) as oldest_entry
             FROM cache_entries
         """).fetchone()
+        
+        per_voice = conn.execute("""
+            SELECT voice_id,
+                   COUNT(*) as entries,
+                   COALESCE(SUM(hit_count), 0) as hits,
+                   COALESCE(SUM(file_size), 0) as size_bytes
+            FROM cache_entries
+            GROUP BY voice_id
+        """).fetchall()
+        
         conn.close()
+        
         if not row:
-            return {"total_entries": 0, "total_size_bytes": 0, "total_hits": 0, "filler_count": 0}
+            return {
+                "total_entries": 0,
+                "total_size_bytes": 0,
+                "total_hits": 0,
+                "total_misses": self._miss_count,
+                "hit_rate": 0.0,
+                "filler_count": 0,
+                "cache_age_seconds": 0,
+                "per_voice": {}
+            }
+        
+        total_hits = int(row["total_hits"])
+        total_misses = self._miss_count
+        total_requests = total_hits + total_misses
+        hit_rate = total_hits / total_requests if total_requests > 0 else 0.0
+        
+        import datetime
+        cache_age_seconds = 0
+        if row["oldest_entry"]:
+            oldest = datetime.datetime.fromisoformat(row["oldest_entry"])
+            cache_age_seconds = int((datetime.datetime.now() - oldest).total_seconds())
+        
+        per_voice_stats = {}
+        for v in per_voice:
+            per_voice_stats[v["voice_id"]] = {
+                "entries": int(v["entries"]),
+                "hits": int(v["hits"]),
+                "size_bytes": int(v["size_bytes"])
+            }
+        
         return {
             "total_entries": int(row["total_entries"]),
             "total_size_bytes": int(row["total_size_bytes"]),
-            "total_hits": int(row["total_hits"]),
+            "total_hits": total_hits,
+            "total_misses": total_misses,
+            "hit_rate": round(hit_rate, 4),
             "filler_count": int(row["filler_count"] or 0),
+            "cache_age_seconds": cache_age_seconds,
+            "per_voice": per_voice_stats
         }
 
     def get_schema_version(self) -> int:

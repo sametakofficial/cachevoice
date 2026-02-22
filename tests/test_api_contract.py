@@ -67,6 +67,9 @@ class StubDB:
     async def record_hit_async(self, text_normalized: str, voice_id: str):
         self.hit_calls.append((text_normalized, voice_id))
 
+    def record_miss(self):
+        pass
+
     def add_entry(
         self,
         text_original: str,

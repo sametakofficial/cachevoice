@@ -15,6 +15,8 @@ def test_health(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "ok"
+    assert "provider_status" in data
+    assert data["provider_status"] in ["available", "unavailable", "unknown"]
 
 
 def test_cache_stats(client):
@@ -22,6 +24,14 @@ def test_cache_stats(client):
     assert resp.status_code == 200
     data = resp.json()
     assert "total_entries" in data
+    assert "total_hits" in data
+    assert "total_misses" in data
+    assert "hit_rate" in data
+    assert "cache_age_seconds" in data
+    assert "per_voice" in data
+    assert isinstance(data["hit_rate"], float)
+    assert 0.0 <= data["hit_rate"] <= 1.0
+    assert isinstance(data["per_voice"], dict)
 
 
 def test_speech_empty_input(client):

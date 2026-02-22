@@ -148,3 +148,71 @@ evictor.run() deleted entries from DB + filesystem but never updated HotCache. S
 - test_config_all_disabled: no transforms applied
 - test_default_config_backward_compatible: explicit default == implicit default
 - 75/75 tests pass
+
+## T10: Deprecated Gateway File Removal
+
+**Deleted files:**
+- `cachevoice/gateway/minimax.py`
+- `cachevoice/gateway/openai.py`
+- `cachevoice/gateway/elevenlabs.py`
+
+**Verification:**
+- No imports found in codebase (grep confirmed)
+- `gateway/__init__.py` had no references to deprecated files
+- Import test passed: `from cachevoice.server import app` succeeded
+- Full test suite: 75/75 passed
+
+**Outcome:** Clean removal, no breaking changes. LiteLLMRouter fully replaced these deprecated gateways.
+
+## T10: Enhanced Cache Stats and Health Endpoints
+
+### Changes Made
+1. **Miss Count Tracking**: Added in-memory `_miss_count` counter to `CacheMetadataDB.__init__()` with `record_miss()` and `get_miss_count()` methods
+2. **Enhanced get_stats()**: Now returns:
+   - `hit_rate`: Calculated as `total_hits / (total_hits + total_misses)`, rounded to 4 decimals
+   - `total_misses`: From in-memory counter
+   - `cache_age_seconds`: Time since oldest entry `created_at` using `MIN(created_at)` query
+   - `per_voice`: Dict breakdown with `{voice_id: {entries, hits, size_bytes}}` from grouped query
+3. **Enhanced /health endpoint**: Added `provider_status` field (available/unavailable/unknown) and optional `last_error_time` from gateway attributes
+4. **Miss Recording**: Added `_db.record_miss()` calls in server.py for all cache miss paths (text too long, normal miss, no cache)
+5. **Test Updates**: Enhanced integration tests to verify new fields, added `record_miss()` stub to test fixtures
+
+### Implementation Notes
+- Miss count is in-memory only (resets on restart) - acceptable for stats monitoring
+- Per-voice stats use single GROUP BY query for efficiency
+- Cache age uses `datetime.fromisoformat()` for SQLite timestamp parsing
+- Return type changed from `dict[str, int]` to `dict[str, object]` to support mixed types
+- All 75 tests pass
+
+### API Response Example
+```json
+{
+  "total_entries": 150,
+  "total_hits": 450,
+  "total_misses": 50,
+  "hit_rate": 0.9000,
+  "cache_age_seconds": 86400,
+  "per_voice": {
+    "Decent_Boy": {"entries": 100, "hits": 300, "size_bytes": 5242880},
+    "alloy": {"entries": 50, "hits": 150, "size_bytes": 2621440}
+  }
+}
+```
+
+## T11: Fuzzy Matching Simplification + Voice Bucketing (2026-02-22)
+
+### Changes Made
+- config.py: `FuzzyConfig.enabled` default changed from `True` to `False` — normalizer already handles case+diacritic, exact match sufficient
+- hot.py: Refactored from flat `dict[str, str]` keyed by `"{norm}:{voice}"` to voice-bucketed `dict[voice_id, dict[normalized_text, list[audio_path]]]` using `defaultdict`
+- hot.py: `fuzzy_lookup()` now accepts `scorer` param, uses `SCORERS` dict to resolve scorer function from config string
+- hot.py: Added `get_paths()` for variety depth — returns all cached audio paths for a (text, voice) pair
+- matcher.py: `FuzzyMatcher.__init__` now takes `FuzzyConfig` instead of bare `threshold: int`. Respects `enabled` flag — skips fuzzy scan when disabled.
+- store.py: `FuzzyCacheStorage.__init__` takes `fuzzy_config: FuzzyConfig` instead of `fuzzy_threshold: int`
+- server.py + test_litellm_integration.py: Updated callers to pass `fuzzy_config=settings.cache.fuzzy`
+
+### Key Findings
+- Old HotCache had O(n) candidate filtering on every fuzzy lookup (`[t for t in self._texts if f"{t}:{voice_id}" in self._exact]`). Voice bucketing eliminates this — candidates are directly `bucket.keys()`.
+- `list[audio_path]` per text enables variety depth without schema changes — multiple TTS generations for same text stored as list.
+- Duplicate audio paths in `add()` are deduplicated with `if path not in paths` check.
+- `size` property counts unique (text, voice) pairs across all buckets, not total audio paths.
+- 80/80 tests pass including 5 new tests: fuzzy_disabled_by_default, fuzzy_enabled_via_config, voice_bucketing, voice_bucketing_variety_depth, voice_bucketing_size.

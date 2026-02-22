@@ -3,6 +3,8 @@ from cachevoice.cache.store import FuzzyCacheStorage
 from cachevoice.cache.metadata import CacheMetadataDB
 from cachevoice.cache.evictor import CacheEvictor
 from cachevoice.cache.normalizer import normalize
+from cachevoice.cache.hot import HotCache
+from cachevoice.config import FuzzyConfig
 from pathlib import Path
 
 
@@ -46,7 +48,6 @@ def test_clear(store):
 
 
 def test_eviction_syncs_hot_cache(tmp_path):
-    """After eviction, HotCache must not contain stale entries (no FileNotFoundError)."""
     audio_dir = tmp_path / "audio"
     db_path = str(tmp_path / "cache.db")
 
@@ -72,3 +73,48 @@ def test_eviction_syncs_hot_cache(tmp_path):
 
     assert not Path(audio_path).exists()
     assert store.lookup(text, voice) is None
+
+
+def test_fuzzy_disabled_by_default(tmp_path):
+    store = FuzzyCacheStorage(str(tmp_path / "audio"))
+    store.store("merhaba dünya", "v1", b"audio")
+    result = store.lookup("merhaba dunya guzel", "v1")
+    assert result is None
+
+
+def test_fuzzy_enabled_via_config(tmp_path):
+    cfg = FuzzyConfig(enabled=True, threshold=60)
+    store = FuzzyCacheStorage(str(tmp_path / "audio"), fuzzy_config=cfg)
+    store.store("merhaba dünya", "v1", b"audio")
+    result = store.lookup("merhaba dunya guzel", "v1")
+    assert result is not None
+    assert result["match_type"] == "fuzzy"
+
+
+def test_voice_bucketing():
+    hc = HotCache()
+    hc.add("hello", "voice_a", "/a/hello.mp3")
+    hc.add("hello", "voice_b", "/b/hello.mp3")
+
+    assert hc.exact_lookup("hello", "voice_a") == "/a/hello.mp3"
+    assert hc.exact_lookup("hello", "voice_b") == "/b/hello.mp3"
+    assert hc.exact_lookup("hello", "voice_c") is None
+
+
+def test_voice_bucketing_variety_depth():
+    hc = HotCache()
+    hc.add("hello", "v1", "/v1/hello_1.mp3")
+    hc.add("hello", "v1", "/v1/hello_2.mp3")
+    hc.add("hello", "v1", "/v1/hello_1.mp3")
+
+    paths = hc.get_paths("hello", "v1")
+    assert paths == ["/v1/hello_1.mp3", "/v1/hello_2.mp3"]
+    assert hc.size == 1
+
+
+def test_voice_bucketing_size():
+    hc = HotCache()
+    hc.add("a", "v1", "/1.mp3")
+    hc.add("b", "v1", "/2.mp3")
+    hc.add("a", "v2", "/3.mp3")
+    assert hc.size == 3

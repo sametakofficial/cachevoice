@@ -129,7 +129,7 @@ def litellm_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Generator[Li
 
     settings = _make_settings(tmp_path)
     gateway = LiteLLMRouter(settings)
-    store = FuzzyCacheStorage(settings.cache.audio_dir, fuzzy_threshold=settings.cache.fuzzy.threshold)
+    store = FuzzyCacheStorage(settings.cache.audio_dir, fuzzy_config=settings.cache.fuzzy)
     db = CacheMetadataDB(settings.cache.db_path)
 
     monkeypatch.setattr(server, "_settings", settings)

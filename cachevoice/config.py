@@ -62,7 +62,7 @@ class ProvidersConfig(BaseModel):
 
 
 class FuzzyConfig(BaseModel):
-    enabled: bool = True
+    enabled: bool = False
     threshold: int = 90
     scorer: str = "token_sort_ratio"
 
