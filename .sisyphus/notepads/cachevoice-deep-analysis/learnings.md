@@ -256,3 +256,47 @@ evictor.run() deleted entries from DB + filesystem but never updated HotCache. S
 - EdgeTTSProvider voice defaults from `providers.configs.edge.default_voice` in YAML config.
 - Pre-existing caplog flakiness: `_setup_logging` sets `propagate=False`, breaking caplog if integration tests run first. Test file ordering matters.
 - 86/86 tests pass
+
+## T15: Filler Auto-Generation on Startup
+
+### Implementation
+- Added startup check in `server.py` lifespan for `fillers.auto_generate_on_startup` config flag
+- When enabled, calls `filler_manager.generate_fillers(voice_id)` during startup
+- 30-second timeout prevents blocking startup indefinitely
+- Failures logged as warnings, don't crash server (graceful degradation)
+- Log format: "Fillers: generated N/M templates for voice '{voice_id}'"
+
+### Testing
+- Added `test_auto_generate_fillers_on_startup`: verifies log output when enabled
+- Added `test_auto_generate_disabled_by_default`: verifies no generation when disabled
+- Used `capfd` fixture to capture stderr logs (logging goes to stderr by default)
+- Tests pass: 88/88 (1 pre-existing failure in `test_voice_bucketing_variety_depth` unrelated to this task)
+
+### Key Decisions
+- Timeout: 30s prevents long startup delays
+- Error handling: warnings only, continue startup on failure
+- Log level: INFO for success, WARNING for timeout/failure
+- Config requirement: both `auto_generate_on_startup=true` AND `voice_id` must be set
+
+### Integration Points
+- Depends on: FillerManager, FallbackOrchestrator, config system
+- Blocks: none (optional feature)
+- Works with: existing filler generation endpoint `/v1/cache/fillers/generate`
+
+## T16 Foundation: Variety Depth in HotCache + Store (2026-02-22)
+
+### Changes Made
+- Added `cache.variety_depth` to `CacheConfig` with default `1` for backward compatibility.
+- Updated `HotCache` to accept `variety_depth`; `add()` now deduplicates and caps paths per `(text_normalized, voice_id)` by depth.
+- Updated `HotCache.exact_lookup()` to return `random.choice(paths)` when multiple versions exist.
+- Extended `FuzzyCacheStorage` with optional `metadata_db` and `variety_depth`; `store()` now accepts optional `version_num`.
+- `store()` now derives `version_num` from `db.get_version_count(...)` when DB is attached, capped by `variety_depth`, and persists via `db.add_entry(..., version_num=...)`.
+- Filename generation now includes version in hash key for versions `>1`, preserving old hash behavior for version `1`.
+
+### Verification
+- Added tests for:
+  - `variety_depth=1` keeping a single cached path
+  - `variety_depth=4` allowing multiple paths with dedup
+  - random selection path in exact lookup
+  - DB-backed store version increment behavior
+- Full suite passed: `pytest tests/ -v` -> `91 passed`.

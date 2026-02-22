@@ -102,7 +102,7 @@ def test_voice_bucketing():
 
 
 def test_voice_bucketing_variety_depth():
-    hc = HotCache()
+    hc = HotCache(variety_depth=4)
     hc.add("hello", "v1", "/v1/hello_1.mp3")
     hc.add("hello", "v1", "/v1/hello_2.mp3")
     hc.add("hello", "v1", "/v1/hello_1.mp3")
@@ -110,6 +110,37 @@ def test_voice_bucketing_variety_depth():
     paths = hc.get_paths("hello", "v1")
     assert paths == ["/v1/hello_1.mp3", "/v1/hello_2.mp3"]
     assert hc.size == 1
+
+
+def test_voice_bucketing_variety_depth_one_keeps_single_path():
+    hc = HotCache(variety_depth=1)
+    hc.add("hello", "v1", "/v1/hello_1.mp3")
+    hc.add("hello", "v1", "/v1/hello_2.mp3")
+
+    assert hc.get_paths("hello", "v1") == ["/v1/hello_1.mp3"]
+
+
+def test_exact_lookup_random_choice(monkeypatch):
+    hc = HotCache(variety_depth=4)
+    hc.add("hello", "v1", "/v1/hello_1.mp3")
+    hc.add("hello", "v1", "/v1/hello_2.mp3")
+
+    monkeypatch.setattr("cachevoice.cache.hot.random.choice", lambda paths: paths[-1])
+    assert hc.exact_lookup("hello", "v1") == "/v1/hello_2.mp3"
+
+
+def test_store_uses_versioning_with_variety_depth(tmp_path):
+    audio_dir = tmp_path / "audio"
+    db = CacheMetadataDB(str(tmp_path / "cache.db"))
+    store = FuzzyCacheStorage(str(audio_dir), metadata_db=db, variety_depth=4)
+    normalized = normalize("merhaba dünya")
+
+    first = store.store("merhaba dünya", "v1", b"a")
+    second = store.store("merhaba dünya", "v1", b"b")
+
+    assert first != second
+    assert db.get_version_count(normalized, "v1") == 2
+    assert len(store.hot_cache.get_paths(normalized, "v1")) == 2
 
 
 def test_voice_bucketing_size():

@@ -1,5 +1,6 @@
 """In-memory hot cache (dict) — loaded from SQLite at startup."""
 from __future__ import annotations
+import random
 from collections import defaultdict
 from typing import Optional, Callable, Any
 from rapidfuzz import process, fuzz
@@ -13,9 +14,10 @@ SCORERS: dict[str, Callable[..., Any]] = {
 
 
 class HotCache:
-    def __init__(self):
+    def __init__(self, variety_depth: int = 1):
         # Voice bucketing: voice_id -> normalized_text -> [audio_paths]
         self._buckets: dict[str, dict[str, list[str]]] = defaultdict(lambda: dict[str, list[str]]())
+        self._variety_depth = max(1, variety_depth)
 
     def load_entries(self, entries: list[dict[str, str]]):
         for e in entries:
@@ -33,7 +35,11 @@ class HotCache:
         if not bucket:
             return None
         paths = bucket.get(normalized_text)
-        return paths[0] if paths else None
+        if not paths:
+            return None
+        if len(paths) == 1:
+            return paths[0]
+        return random.choice(paths)
 
     def fuzzy_lookup(
         self, normalized_text: str, voice_id: str,
@@ -67,7 +73,7 @@ class HotCache:
         if normalized_text not in bucket:
             bucket[normalized_text] = []
         paths = bucket[normalized_text]
-        if audio_path not in paths:
+        if audio_path not in paths and len(paths) < self._variety_depth:
             paths.append(audio_path)
 
     def remove(self, normalized_text: str, voice_id: str):

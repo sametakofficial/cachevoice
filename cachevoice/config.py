@@ -84,6 +84,7 @@ class CacheConfig(BaseModel):
     audio_dir: str = "./data/audio"
     db_path: str = "./data/cache.db"
     enabled: bool = True
+    variety_depth: int = 1
     fuzzy: FuzzyConfig = FuzzyConfig()
     normalize: NormalizeConfig = NormalizeConfig()
     eviction: EvictionConfig = EvictionConfig()

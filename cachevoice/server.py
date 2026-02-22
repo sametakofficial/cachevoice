@@ -156,6 +156,23 @@ async def lifespan(app: FastAPI):
 
     _filler_mgr = FillerManager(_db, _store, _gateway)
     
+    # Auto-generate fillers on startup if configured
+    if _settings.fillers.auto_generate_on_startup and _settings.fillers.voice_id:
+        try:
+            logger.info("Auto-generating fillers for voice '%s'...", _settings.fillers.voice_id)
+            results = await asyncio.wait_for(
+                _filler_mgr.generate_fillers(_settings.fillers.voice_id),
+                timeout=30.0
+            )
+            generated = sum(1 for r in results if r.get("status") == "generated")
+            total = len(results)
+            logger.info("Fillers: generated %d/%d templates for voice '%s'", 
+                       generated, total, _settings.fillers.voice_id)
+        except asyncio.TimeoutError:
+            logger.warning("Filler auto-generation timed out after 30s, continuing startup")
+        except Exception as e:
+            logger.warning("Filler auto-generation failed: %s, continuing startup", e)
+    
     _evictor = CacheEvictor(
         _db,
         _settings.cache.eviction.max_entries,

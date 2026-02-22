@@ -134,3 +134,77 @@ def test_integrity_preserves_filler_dir(integrity_env):
     _startup_integrity_check(db, store, audio_dir)
 
     assert filler_file.exists()
+
+
+def test_auto_generate_fillers_on_startup(tmp_path, monkeypatch, capfd):
+    import yaml
+    from cachevoice.config import Settings
+    
+    config_path = tmp_path / "test_config.yaml"
+    audio_dir = tmp_path / "audio"
+    db_path = tmp_path / "test.db"
+    audio_dir.mkdir()
+    
+    config_data = {
+        "cache": {
+            "audio_dir": str(audio_dir),
+            "db_path": str(db_path),
+        },
+        "fillers": {
+            "auto_generate_on_startup": True,
+            "voice_id": "TestVoice",
+        },
+        "providers": {
+            "default": "edge",
+            "edge": {
+                "default_voice": "tr-TR-AhmetNeural",
+            },
+        },
+    }
+    
+    with open(config_path, "w") as f:
+        yaml.dump(config_data, f)
+    
+    monkeypatch.setattr("cachevoice.server._load_settings", lambda: Settings.from_yaml(str(config_path)))
+    
+    with TestClient(app) as client:
+        pass
+    
+    captured = capfd.readouterr()
+    assert "Auto-generating fillers for voice 'TestVoice'" in captured.err
+    assert "Fillers: generated" in captured.err
+
+
+def test_auto_generate_disabled_by_default(tmp_path, monkeypatch):
+    import yaml
+    from cachevoice.config import Settings
+    
+    config_path = tmp_path / "test_config.yaml"
+    audio_dir = tmp_path / "audio"
+    db_path = tmp_path / "test.db"
+    audio_dir.mkdir()
+    
+    config_data = {
+        "cache": {
+            "audio_dir": str(audio_dir),
+            "db_path": str(db_path),
+        },
+        "fillers": {
+            "auto_generate_on_startup": False,
+        },
+        "providers": {
+            "default": "edge",
+            "edge": {
+                "default_voice": "tr-TR-AhmetNeural",
+            },
+        },
+    }
+    
+    with open(config_path, "w") as f:
+        yaml.dump(config_data, f)
+    
+    monkeypatch.setattr("cachevoice.server._load_settings", lambda: Settings.from_yaml(str(config_path)))
+    
+    with TestClient(app) as client:
+        resp = client.get("/v1/cache/fillers?voice_id=Decent_Boy")
+        assert resp.status_code == 200
