@@ -304,3 +304,18 @@ evictor.run() deleted entries from DB + filesystem but never updated HotCache. S
 - Variety depth now warms asynchronously: cache HIT schedules next version when version_count < variety_depth, cache MISS stores v1 then schedules v2 when depth > 1.
 - Background generation uses asyncio.create_task plus in-flight dedup set keyed by (text_normalized, voice) so only one warm-up runs per key at a time.
 - Background generation reuses gateway synthesize path, stores with explicit version_num, and logs "Variety: generating version N/M for text_preview" for observability.
+
+## T18: Integration Test Expansion Across T1-T17 Features (2026-02-22)
+
+### New Integration Coverage Added
+- End-to-end cache lifecycle: `store -> hit -> evict -> miss -> re-store` validated through `audio_speech` + `CacheEvictor` to confirm DB/hot-cache/filesystem coherence.
+- Variety depth behavior extended beyond basic warm-up: deterministic random-path serving validated after `N` versions exist, while background generation and in-flight dedup remain intact.
+- MiniMax syntax integration verified at API layer: text with pause markers/interjections and plain text resolve to the same normalized cache key and reuse cached audio.
+- Parallel request integration validated that concurrent identical misses collapse to one persisted cache entry (`version_count == 1`) with no duplicate hot-cache paths.
+- Provider fallback integration validated with real `FallbackOrchestrator` wiring in server flow: primary timeout falls back to Edge and still stores successful audio in cache.
+- Format conversion integration validated for `mp3 -> opus`: gateway stays mp3-facing, conversion output is cached in `.opus`, and subsequent requests hit cache without gateway calls.
+- Filler integration validated end-to-end with generation endpoint + list lookup to ensure generated templates become immediately cache-addressable.
+- Startup integrity coverage expanded with mixed-state cleanup (orphan DB row + orphan audio file) while preserving fillers subtree and non-audio artifacts.
+
+### Practical Testing Pattern Learned
+- For stable integration tests without external dependencies, monkeypatch server globals (`_settings`, `_store`, `_db`, `_gateway`, `_filler_mgr`) and invoke route handlers with synthetic Starlette `Request` objects. This gives true server-path behavior while keeping tests deterministic and offline.
