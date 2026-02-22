@@ -300,3 +300,7 @@ evictor.run() deleted entries from DB + filesystem but never updated HotCache. S
   - random selection path in exact lookup
   - DB-backed store version increment behavior
 - Full suite passed: `pytest tests/ -v` -> `91 passed`.
+
+- Variety depth now warms asynchronously: cache HIT schedules next version when version_count < variety_depth, cache MISS stores v1 then schedules v2 when depth > 1.
+- Background generation uses asyncio.create_task plus in-flight dedup set keyed by (text_normalized, voice) so only one warm-up runs per key at a time.
+- Background generation reuses gateway synthesize path, stores with explicit version_num, and logs "Variety: generating version N/M for text_preview" for observability.

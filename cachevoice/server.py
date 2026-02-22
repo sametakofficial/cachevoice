@@ -11,6 +11,7 @@ import tempfile
 import subprocess
 import os
 import sqlite3
+from typing import cast
 
 from .config import Settings
 from .cache.store import FuzzyCacheStorage
@@ -47,6 +48,7 @@ _settings: Settings | None = None
 _evictor: CacheEvictor | None = None
 _write_counter: int = 0
 _eviction_task: asyncio.Task[None] | None = None
+_variety_in_flight: set[tuple[str, str]] = set()
 
 
 def _startup_integrity_check(
@@ -60,7 +62,7 @@ def _startup_integrity_check(
     orphan_db_ids: list[int] = []
     for entry in entries:
         if not Path(str(entry["audio_path"])).exists():
-            orphan_db_ids.append(int(entry["id"]))  # type: ignore[arg-type]
+            orphan_db_ids.append(int(cast(int, entry["id"])))
             store.hot_cache.remove(
                 str(entry["text_normalized"]), str(entry["voice_id"])
             )
@@ -70,7 +72,7 @@ def _startup_integrity_check(
     # Phase 2: Audio files not referenced in DB (skip fillers dir)
     db_paths: set[str] = set()
     for entry in entries:
-        if int(entry["id"]) not in orphan_db_ids:  # type: ignore[arg-type]
+        if int(cast(int, entry["id"])) not in orphan_db_ids:
             db_paths.add(str(Path(str(entry["audio_path"])).resolve()))
 
     orphan_files_removed = 0
@@ -130,10 +132,11 @@ async def lifespan(app: FastAPI):
     _store = FuzzyCacheStorage(
         audio_dir=_settings.cache.audio_dir,
         fuzzy_config=_settings.cache.fuzzy,
+        variety_depth=_settings.cache.variety_depth,
     )
 
     entries = _db.get_all_entries()
-    _store.hot_cache.load_entries(entries)
+    _store.hot_cache.load_entries(cast(list[dict[str, str]], entries))
     logger.info("Loaded %d cache entries into hot cache", len(entries))
 
     _startup_integrity_check(_db, _store, _settings.cache.audio_dir)
@@ -196,6 +199,85 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="CacheClaw", version="0.1.0", lifespan=lifespan)
+
+
+def _schedule_variety_generation(
+    text: str,
+    text_normalized: str,
+    voice: str,
+    model: str,
+    response_format: str,
+    version_num: int,
+) -> None:
+    key = (text_normalized, voice)
+    if key in _variety_in_flight:
+        return
+    _variety_in_flight.add(key)
+    asyncio.create_task(_generate_variety(text, voice, model, response_format, version_num))
+
+
+def _get_variety_depth() -> int:
+    if not _settings:
+        return 1
+    return max(1, int(getattr(_settings.cache, "variety_depth", 1)))
+
+
+async def _generate_variety(
+    text: str,
+    voice: str,
+    model: str,
+    response_format: str,
+    version_num: int,
+) -> None:
+    text_normalized = normalize(text)
+    key = (text_normalized, voice)
+    variety_depth = _get_variety_depth()
+    text_preview = text[:50]
+    logger.info(
+        "Variety: generating version %d/%d for '%s'",
+        version_num,
+        variety_depth,
+        text_preview,
+    )
+    try:
+        if not _gateway or not _store or not _db:
+            return
+
+        audio_data = await _gateway.synthesize(text, voice, model, "mp3")
+        provider_format = "mp3"
+        if response_format != "mp3":
+            converted = _convert_audio_format(audio_data, response_format)
+            if converted:
+                audio_data = converted
+                provider_format = response_format
+
+        audio_path = _store.store(
+            text,
+            voice,
+            audio_data,
+            provider_format,
+            version_num=version_num,
+        )
+        _db.add_entry(
+            text_original=text,
+            text_normalized=text_normalized,
+            voice_id=voice,
+            audio_path=audio_path,
+            model=model,
+            audio_format=provider_format,
+            file_size=len(audio_data),
+            version_num=version_num,
+        )
+    except sqlite3.IntegrityError:
+        if _db:
+            try:
+                await _db.record_hit_async(text_normalized, voice, version_num=version_num)
+            except TypeError:
+                await _db.record_hit_async(text_normalized, voice)
+    except Exception as e:
+        logger.warning("Variety generation failed for '%s': %s", text_preview, e)
+    finally:
+        _variety_in_flight.discard(key)
 
 
 def _convert_audio_format(audio_data: bytes, target_format: str) -> bytes | None:
@@ -305,7 +387,7 @@ async def audio_speech(request: Request):
     if _store and _settings and _settings.cache.enabled:
         result = _store.lookup(text, voice)
         if result:
-            audio_path = result["audio_path"]
+            audio_path = cast(str, result["audio_path"])
             cached_format = Path(audio_path).suffix[1:]
             
             try:
@@ -327,8 +409,25 @@ async def audio_speech(request: Request):
                         response_format = cached_format
                 
                 if _db:
-                    normalized = result.get("matched", result.get("normalized", normalize(text)))
-                    await _db.record_hit_async(normalized, voice)
+                    matched_normalized = cast(
+                        str,
+                        result.get("matched", result.get("normalized", normalize(text))),
+                    )
+                    request_normalized = cast(str, result.get("normalized", normalize(text)))
+                    await _db.record_hit_async(matched_normalized, voice)
+
+                    if hasattr(_db, "get_version_count"):
+                        version_count = _db.get_version_count(request_normalized, voice)
+                        variety_depth = _get_variety_depth()
+                        if version_count < variety_depth:
+                            _schedule_variety_generation(
+                                text=text,
+                                text_normalized=request_normalized,
+                                voice=voice,
+                                model=model,
+                                response_format=response_format,
+                                version_num=version_count + 1,
+                            )
                 
                 logger.info(
                     "Cache HIT | reason_code=%s text_preview='%s' voice_id=%s score=%s",
@@ -381,15 +480,32 @@ async def audio_speech(request: Request):
             normalized = normalize(text)
             audio_path = _store.store(text, voice, audio_data, provider_format)
             try:
-                _db.add_entry(
-                    text_original=text, text_normalized=normalized, voice_id=voice,
-                    audio_path=audio_path, model=model, audio_format=provider_format,
-                    file_size=len(audio_data),
-                )
+                try:
+                    _db.add_entry(
+                        text_original=text, text_normalized=normalized, voice_id=voice,
+                        audio_path=audio_path, model=model, audio_format=provider_format,
+                        file_size=len(audio_data), version_num=1,
+                    )
+                except TypeError:
+                    _db.add_entry(
+                        text_original=text, text_normalized=normalized, voice_id=voice,
+                        audio_path=audio_path, model=model, audio_format=provider_format,
+                        file_size=len(audio_data),
+                    )
                 logger.info(
                     "Cache MISS | reason_code=miss text_preview='%s' voice_id=%s format=%s",
                     text[:50], voice, provider_format
                 )
+
+                if _get_variety_depth() > 1:
+                    _schedule_variety_generation(
+                        text=text,
+                        text_normalized=normalized,
+                        voice=voice,
+                        model=model,
+                        response_format=response_format,
+                        version_num=2,
+                    )
             except sqlite3.IntegrityError:
                 await _db.record_hit_async(normalized, voice)
                 logger.info(
