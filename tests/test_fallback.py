@@ -112,3 +112,51 @@ async def test_http_400_does_not_fallback_to_edge():
     assert exc_info.value.status_code == 400
     assert lite.calls == 1
     assert edge.calls == 0
+
+
+@pytest.mark.anyio
+async def test_500_error_falls_back_to_edge():
+    lite = StubLiteLLMRouter([_http_status_error(500, "internal server error")])
+    edge = StubEdgeProvider(b"edge-fallback-audio")
+    orchestrator = FallbackOrchestrator(["litellm", "edge_tts"], lite, edge)
+
+    audio = await orchestrator.synthesize("hello", "alloy")
+
+    assert audio == b"edge-fallback-audio"
+    assert lite.calls == 1
+    assert edge.calls == 1
+
+
+@pytest.mark.anyio
+async def test_circuit_breaker_opens_after_3_failures_within_window():
+    error_500 = _http_status_error(500, "server error")
+    lite = StubLiteLLMRouter([error_500, error_500, error_500, error_500])
+    edge = StubEdgeProvider(b"edge-audio")
+    clock = StepClock()
+    orchestrator = FallbackOrchestrator(
+        ["litellm", "edge_tts"], lite, edge,
+        failure_threshold=3, failure_window_seconds=300, now_fn=clock,
+    )
+
+    await orchestrator.synthesize("t1", "v")
+    await orchestrator.synthesize("t2", "v")
+    await orchestrator.synthesize("t3", "v")
+
+    assert lite.calls == 3
+    assert edge.calls == 3
+
+    audio = await orchestrator.synthesize("t4", "v")
+    assert audio == b"edge-audio"
+    assert lite.calls == 3
+    assert edge.calls == 4
+
+
+@pytest.mark.anyio
+async def test_available_property():
+    lite = StubLiteLLMRouter([])
+    edge = StubEdgeProvider(b"")
+    orchestrator = FallbackOrchestrator(["litellm", "edge_tts"], lite, edge)
+    assert orchestrator.available is True
+
+    empty = FallbackOrchestrator([], lite, edge)
+    assert empty.available is False

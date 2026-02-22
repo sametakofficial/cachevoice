@@ -18,6 +18,8 @@ from .cache.metadata import CacheMetadataDB
 from .cache.normalizer import normalize
 from .cache.evictor import CacheEvictor
 from .gateway.litellm_router import LiteLLMRouter
+from .gateway.fallback import FallbackOrchestrator
+from .gateway.edge import EdgeTTSProvider
 from .fillers.manager import FillerManager
 
 logger = logging.getLogger("cachevoice")
@@ -39,12 +41,58 @@ def _setup_logging(log_level: str = "info"):
 
 _store: FuzzyCacheStorage | None = None
 _db: CacheMetadataDB | None = None
-_gateway: LiteLLMRouter | None = None
+_gateway: FallbackOrchestrator | None = None
 _filler_mgr: FillerManager | None = None
 _settings: Settings | None = None
 _evictor: CacheEvictor | None = None
 _write_counter: int = 0
 _eviction_task: asyncio.Task[None] | None = None
+
+
+def _startup_integrity_check(
+    db: CacheMetadataDB, store: FuzzyCacheStorage, audio_dir: str
+) -> None:
+    audio_dir_path = Path(audio_dir)
+    fillers_dir = audio_dir_path / "fillers"
+
+    # Phase 1: DB entries with missing audio files
+    entries = db.get_all_entries_with_ids()
+    orphan_db_ids: list[int] = []
+    for entry in entries:
+        if not Path(str(entry["audio_path"])).exists():
+            orphan_db_ids.append(int(entry["id"]))  # type: ignore[arg-type]
+            store.hot_cache.remove(
+                str(entry["text_normalized"]), str(entry["voice_id"])
+            )
+
+    db.delete_entries_by_ids(orphan_db_ids)
+
+    # Phase 2: Audio files not referenced in DB (skip fillers dir)
+    db_paths: set[str] = set()
+    for entry in entries:
+        if int(entry["id"]) not in orphan_db_ids:  # type: ignore[arg-type]
+            db_paths.add(str(Path(str(entry["audio_path"])).resolve()))
+
+    orphan_files_removed = 0
+    if audio_dir_path.exists():
+        for f in audio_dir_path.iterdir():
+            if not f.is_file():
+                continue
+            if f.suffix not in (".mp3", ".ogg", ".wav", ".opus"):
+                continue
+            resolved = str(f.resolve())
+            if resolved not in db_paths:
+                try:
+                    f.unlink()
+                    orphan_files_removed += 1
+                except OSError:
+                    pass
+
+    logger.info(
+        "Startup: removed %d orphan DB entries, %d orphan files",
+        len(orphan_db_ids),
+        orphan_files_removed,
+    )
 
 
 def _load_settings() -> Settings:
@@ -88,7 +136,23 @@ async def lifespan(app: FastAPI):
     _store.hot_cache.load_entries(entries)
     logger.info("Loaded %d cache entries into hot cache", len(entries))
 
-    _gateway = LiteLLMRouter(_settings)
+    _startup_integrity_check(_db, _store, _settings.cache.audio_dir)
+
+    litellm_router = LiteLLMRouter(_settings)
+
+    edge_cfg = _settings.providers.configs.get("edge")
+    edge_voice = edge_cfg.default_voice if edge_cfg else "tr-TR-AhmetNeural"
+    edge_provider = EdgeTTSProvider(default_voice=edge_voice)
+
+    fallback_chain = ["litellm"]
+    if "edge" in _settings.providers.fallback_chain:
+        fallback_chain.append("edge")
+    _gateway = FallbackOrchestrator(
+        fallback_chain=fallback_chain,
+        litellm_router=litellm_router,
+        edge_provider=edge_provider,
+    )
+    logger.info("FallbackOrchestrator initialized: chain=%s", fallback_chain)
 
     _filler_mgr = FillerManager(_db, _store, _gateway)
     
@@ -269,6 +333,8 @@ async def audio_speech(request: Request):
     # Gateway returns mp3 by default
     try:
         audio_data = await _gateway.synthesize(text, voice, model, "mp3")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("TTS API error: %s", e)
         return Response(content=str(e).encode(), status_code=502)

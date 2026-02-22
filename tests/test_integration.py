@@ -1,13 +1,30 @@
 """Integration tests — full cache flow."""
 import pytest
+import tempfile
+import os
+from pathlib import Path
 from fastapi.testclient import TestClient
-from cachevoice.server import app
+from cachevoice.server import app, _startup_integrity_check
+from cachevoice.cache.metadata import CacheMetadataDB
+from cachevoice.cache.store import FuzzyCacheStorage
 
 
 @pytest.fixture
 def client():
     with TestClient(app) as c:
         yield c
+
+
+@pytest.fixture
+def integrity_env(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    audio_dir = str(tmp_path / "audio")
+    os.makedirs(audio_dir, exist_ok=True)
+    fillers_dir = tmp_path / "audio" / "fillers"
+    fillers_dir.mkdir()
+    db = CacheMetadataDB(db_path)
+    store = FuzzyCacheStorage(audio_dir=audio_dir)
+    return db, store, audio_dir, tmp_path
 
 
 def test_health(client):
@@ -56,3 +73,64 @@ def test_list_fillers(client):
     data = resp.json()
     assert "fillers" in data
     assert len(data["fillers"]) > 0
+
+
+def test_integrity_removes_orphan_db_entries(integrity_env):
+    db, store, audio_dir, tmp_path = integrity_env
+
+    real_file = Path(audio_dir) / "real.mp3"
+    real_file.write_bytes(b"audio-data")
+    db.add_entry(
+        text_original="real", text_normalized="real", voice_id="v1",
+        audio_path=str(real_file), audio_format="mp3", file_size=10,
+    )
+
+    db.add_entry(
+        text_original="ghost", text_normalized="ghost", voice_id="v1",
+        audio_path=str(Path(audio_dir) / "nonexistent.mp3"), audio_format="mp3",
+        file_size=10,
+    )
+
+    store.hot_cache.load_entries(db.get_all_entries())
+    assert store.hot_cache.size == 2
+
+    _startup_integrity_check(db, store, audio_dir)
+
+    assert len(db.get_all_entries()) == 1
+    assert store.hot_cache.exact_lookup("ghost", "v1") is None
+    assert store.hot_cache.exact_lookup("real", "v1") is not None
+    assert real_file.exists()
+
+
+def test_integrity_removes_orphan_audio_files(integrity_env):
+    db, store, audio_dir, tmp_path = integrity_env
+
+    real_file = Path(audio_dir) / "real.mp3"
+    real_file.write_bytes(b"audio-data")
+    db.add_entry(
+        text_original="real", text_normalized="real", voice_id="v1",
+        audio_path=str(real_file), audio_format="mp3", file_size=10,
+    )
+
+    orphan_file = Path(audio_dir) / "orphan.mp3"
+    orphan_file.write_bytes(b"orphan-data")
+
+    store.hot_cache.load_entries(db.get_all_entries())
+
+    _startup_integrity_check(db, store, audio_dir)
+
+    assert real_file.exists()
+    assert not orphan_file.exists()
+    assert len(db.get_all_entries()) == 1
+
+
+def test_integrity_preserves_filler_dir(integrity_env):
+    db, store, audio_dir, tmp_path = integrity_env
+
+    fillers_dir = Path(audio_dir) / "fillers"
+    filler_file = fillers_dir / "hmm.mp3"
+    filler_file.write_bytes(b"filler-audio")
+
+    _startup_integrity_check(db, store, audio_dir)
+
+    assert filler_file.exists()

@@ -183,6 +183,26 @@ class CacheMetadataDB:
         conn.close()
         return [dict(r) for r in rows]
 
+    def get_all_entries_with_ids(self) -> list[dict[str, object]]:
+        """Return all entries including id for integrity checks."""
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT id, text_normalized, voice_id, audio_path, is_filler, version_num FROM cache_entries"
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def delete_entries_by_ids(self, ids: list[int]) -> int:
+        """Bulk delete entries by ID list. Returns count deleted."""
+        if not ids:
+            return 0
+        conn = self._get_conn()
+        placeholders = ",".join("?" for _ in ids)
+        conn.execute(f"DELETE FROM cache_entries WHERE id IN ({placeholders})", ids)
+        conn.commit()
+        conn.close()
+        return len(ids)
+
     def get_stats(self) -> dict[str, object]:
         conn = self._get_conn()
         row = conn.execute("""

@@ -216,3 +216,43 @@ evictor.run() deleted entries from DB + filesystem but never updated HotCache. S
 - Duplicate audio paths in `add()` are deduplicated with `if path not in paths` check.
 - `size` property counts unique (text, voice) pairs across all buckets, not total audio paths.
 - 80/80 tests pass including 5 new tests: fuzzy_disabled_by_default, fuzzy_enabled_via_config, voice_bucketing, voice_bucketing_variety_depth, voice_bucketing_size.
+
+## T17: Startup Integrity Check — DB↔Filesystem Consistency (2026-02-22)
+
+### Changes Made
+- metadata.py: Added `get_all_entries_with_ids()` (includes `id` column) and `delete_entries_by_ids(ids)` (bulk DELETE with IN clause)
+- server.py: Added `_startup_integrity_check(db, store, audio_dir)` function with two phases:
+  - Phase 1: Scan all DB entries, delete those whose audio_path doesn't exist on disk, remove from HotCache
+  - Phase 2: Scan audio_dir for files not referenced by any DB entry, delete orphan files
+- server.py lifespan: Called after HotCache load (line ~90), before gateway/filler init
+- Fillers directory is safe: only iterates top-level audio_dir files (not subdirs), so fillers/ contents are untouched
+- Logs: "Startup: removed N orphan DB entries, M orphan files"
+
+### Key Findings
+- `audio_dir.iterdir()` only yields direct children — fillers live in `audio_dir/fillers/` subdir, so `f.is_file()` check naturally skips the fillers directory
+- Path resolution (`Path.resolve()`) needed for reliable set membership comparison between DB paths and filesystem paths
+- Bulk delete via `WHERE id IN (?,?,...)` is efficient for batch orphan removal
+- Pre-existing basedpyright errors in server.py are all `dict[str, object]` type narrowing issues, not introduced by this change
+
+### Test Coverage (3 new tests)
+- `test_integrity_removes_orphan_db_entries`: DB entry with missing file → removed from DB + HotCache, valid entry preserved
+- `test_integrity_removes_orphan_audio_files`: Audio file not in DB → deleted, referenced file preserved
+- `test_integrity_preserves_filler_dir`: Filler files in fillers/ subdir untouched
+- 83/83 tests pass
+
+## T11-wire: FallbackOrchestrator Wired into server.py (2026-02-22)
+
+### Changes Made
+- server.py: `_gateway` type changed from `LiteLLMRouter` to `FallbackOrchestrator`. LiteLLMRouter now wrapped inside FallbackOrchestrator alongside EdgeTTSProvider.
+- server.py: Fallback chain is config-driven — `["litellm"]` base, `"edge"` appended if present in `providers.fallback_chain`.
+- server.py: HTTPException re-raised before generic `except Exception` to preserve FallbackOrchestrator's 503 status code.
+- fallback.py: Added `available` property (True if fallback_chain non-empty) for `/health` endpoint compat.
+- fallback.py: `synthesize` signature updated to `voice: str | None = None, model: str | None = None` to match `_SynthesizerGateway` protocol.
+- fallback.py: `_should_fallback` extended to include `RuntimeError` — LiteLLMRouter raises this when no deployments exist.
+
+### Key Findings
+- FillerManager uses `_SynthesizerGateway` protocol with `synthesize(text, voice)`. FallbackOrchestrator needed optional params to satisfy this.
+- `LiteLLMRouter.synthesize` raises `RuntimeError("No TTS gateway configured")` when no deployments — this must trigger Edge fallback, not abort.
+- EdgeTTSProvider voice defaults from `providers.configs.edge.default_voice` in YAML config.
+- Pre-existing caplog flakiness: `_setup_logging` sets `propagate=False`, breaking caplog if integration tests run first. Test file ordering matters.
+- 86/86 tests pass

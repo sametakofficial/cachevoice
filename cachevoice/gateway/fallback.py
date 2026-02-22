@@ -50,14 +50,21 @@ class FallbackOrchestrator:
             lambda: _CircuitState(failures=deque())
         )
 
+    @property
+    def available(self) -> bool:
+        """True when at least one provider is in the fallback chain."""
+        return len(self._fallback_chain) > 0
+
     async def synthesize(
         self,
         text: str,
-        voice: str,
-        model: str = "tts-1",
+        voice: str | None = None,
+        model: str | None = None,
         response_format: str = "mp3",
     ) -> bytes:
         errors: list[str] = []
+        effective_voice = voice or "alloy"
+        effective_model = model or "tts-1"
 
         for provider_name in self._fallback_chain:
             if self._is_circuit_open(provider_name):
@@ -73,8 +80,8 @@ class FallbackOrchestrator:
                 audio = await self._call_provider(
                     provider_name,
                     text=text,
-                    voice=voice,
-                    model=model,
+                    voice=effective_voice,
+                    model=effective_model,
                     response_format=response_format,
                 )
                 self._clear_failures(provider_name)
@@ -141,7 +148,7 @@ class FallbackOrchestrator:
             if status_code == 429:
                 return True
             return status_code >= 500
-        return isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, asyncio.TimeoutError))
+        return isinstance(exc, (RuntimeError, httpx.TimeoutException, httpx.ConnectError, asyncio.TimeoutError))
 
     def _count_failure(self, status_code: int | None, exc: Exception) -> bool:
         if status_code is not None:
